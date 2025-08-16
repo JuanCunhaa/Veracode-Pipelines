@@ -1,0 +1,89 @@
+# APIID, APIKEY e SRCCLR_API_TOKEN nos secrets
+
+name: Veracode (CLI Packager + CLI Pipeline Scan) + Actions (SCA, SARIF, Upload&Scan)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  veracode:
+    runs-on: ubuntu-latest
+    env:
+      VERACODE_API_KEY_ID: ${{ secrets.VID }}
+      VERACODE_API_KEY_SECRET: ${{ secrets.VKEY }}
+    steps:
+      - name: 🏁 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🧩 Veracode SCA (Agent-Based)
+        uses: veracode/veracode-sca@v2
+        env:
+          SRCCLR_API_TOKEN: ${{ secrets.SRCCLR_API_TOKEN }}
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          path: .
+          quick: false
+          create-issues: false
+          # recursive: true
+          # skip-collectors: "npm,gradle"
+          # allow-dirty: true
+
+      - name: ⬇️ Instalar Veracode CLI
+        run: |
+          set -euo pipefail
+          curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+          ./veracode version
+
+      - name: 📦 Auto Packager (CLI, verbose)
+        id: pack
+        run: |
+          set -euo pipefail
+          out="veracode-out"
+          mkdir -p "$out"
+          ./veracode package --source . --output "$out" --trust --verbose
+          ZIP="$(find "$out" -maxdepth 1 -type f -name '*.zip' | head -n1)"
+          if [ -z "${ZIP:-}" ]; then
+            echo "Nenhum .zip gerado pelo Auto Packager"; exit 1
+          fi
+          echo "artifact=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: 🔍 Pipeline Scan (CLI)
+        run: |
+          set -euo pipefail
+          ./veracode static scan "${{ steps.pack.outputs.artifact }}" \
+            --results-file results.json \
+            --summary-output results.txt \
+            --fail-on-severity "Very High, High" \
+            --verbose
+
+      - name: 🚀 Veracode Upload & Scan
+        uses: veracode/veracode-uploadandscan-action@0.2.8
+        with:
+          vid: ${{ secrets.VID }}
+          vkey: ${{ secrets.VKEY }}
+          appname: ${{ github.repository }}
+          createprofile: true
+          filepath: ${{ steps.pack.outputs.artifact }}
+          version: build-${{ github.run_id }}-${{ github.sha }}
+          deleteincompletescan: 2
+          scantimeout: 60
+          # sandboxname: MeuSandbox
+          # policy: MinhaPolicy
+          # criticality: High
+
+      - name: 📤 Publicar artefatos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: veracode-artifacts
+          path: |
+            ${{ steps.pack.outputs.artifact }}
+            results.json
+            results.txt
+            veracode-results.sarif

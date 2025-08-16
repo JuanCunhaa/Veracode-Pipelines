@@ -1,0 +1,33 @@
+# Não necessário adicionar nada nos secrets
+
+name: Veracode Auto Packager (CLI)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  autopackager:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🏁 Checkout
+        uses: actions/checkout@v4
+
+      - name: ⬇️ Instalar Veracode CLI
+        run: |
+          set -euo pipefail
+          curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+          ./veracode version
+
+      - name: 📦 Executar Auto Packager (verbose)
+        run: |
+          set -euo pipefail
+          out_dir="veracode-out"
+          mkdir -p "$out_dir"
+          ./veracode package --source . --output "$out_dir" --trust --verbose
+          echo "✅ Pacotes gerados:"
+          ls -lh "$out_dir"

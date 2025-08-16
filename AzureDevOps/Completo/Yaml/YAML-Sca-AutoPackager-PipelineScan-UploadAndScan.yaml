@@ -1,0 +1,149 @@
+# Incluir APIID, APIKEY e SRCCLR_API_TOKEN no variables group
+
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - group: VeracodeSecrets # Nome do variable group
+
+stages:
+  - stage: Build
+    displayName: '🧱 Build da aplicação'
+    jobs:
+      - job: Build
+        displayName: '🔨 Job de Build'
+        steps:
+          - checkout: self
+
+          - powershell: |
+              Set-ExecutionPolicy AllSigned -Scope Process -Force
+              $ProgressPreference = "silentlyContinue"
+
+              # Instala CLI e executa o build com pacote VAS
+              iex ((New-Object System.Net.WebClient).DownloadString('https://tools.veracode.com/veracode-cli/install.ps1'))
+              veracode package -vas . --output ./output
+            displayName: '📦 Build com Veracode CLI (VAS)'
+
+          - powershell: |
+              # Detectar arquivo gerado (.jar, .war, .zip)
+              $artifact = Get-ChildItem -Path "./output" -Include *.jar,*.war,*.zip -Recurse | Select-Object -First 1
+              if (-not $artifact) {
+                Write-Error "❌ Nenhum artefato .jar, .war ou .zip encontrado."
+                exit 1
+              }
+
+              $ext = $artifact.Extension
+              $newName = "verascan$ext"
+              $dest = Join-Path -Path "$(Build.ArtifactStagingDirectory)" -ChildPath $newName
+
+              Copy-Item $artifact.FullName $dest
+              Write-Host "✅ Renomeado para $newName"
+            displayName: '🔁 Renomear para verascan.ext'
+
+          - task: PublishBuildArtifacts@1
+            displayName: '🚀 Publicar artefato'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: 'analysisPack'
+              publishLocation: 'Container'
+
+  - stage: SCA
+    displayName: '🔍 Veracode SCA'
+    dependsOn: Build
+    jobs:
+      - job: SCA
+        displayName: 'SCA Job'
+        pool:
+          vmImage: 'ubuntu-22.04'
+        continueOnError: true
+        steps:
+          - checkout: self
+          - bash: curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --update-advisor --allow-dirty
+            continueOnError: true
+            env:
+              SRCCLR_API_TOKEN: $(SRCCLR_API_TOKEN)
+
+  - stage: PipelineScan
+    displayName: '🧪 Veracode Pipeline Scan'
+    dependsOn: Build
+    jobs:
+      - job: PipelineScanJob
+        displayName: '📦 Pipeline Scan Job'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: DownloadBuildArtifacts@0
+            displayName: '📥 Baixar artefato publicado'
+            inputs:
+              artifactName: 'analysisPack'
+              downloadPath: '$(System.ArtifactsDirectory)'
+
+          - bash: |
+              FILE=$(find "$(System.ArtifactsDirectory)/analysisPack" -type f -name "verascan.*" | head -n 1)
+
+              if [ ! -f "$FILE" ]; then
+                echo "❌ Arquivo verascan.* não encontrado."
+                exit 1
+              fi
+
+              echo "✅ Encontrado: $FILE"
+
+              curl -O -L https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+              unzip pipeline-scan-LATEST.zip -d pipeline-scan
+
+              echo "🔍 Executando Pipeline Scan..."
+              java -jar pipeline-scan/pipeline-scan.jar \
+                -vid "$APIID" \
+                -vkey "$APIKEY" \
+                -f "$FILE"
+            displayName: '🧪 Executar Pipeline Scan'
+            env:
+              APIID: $(APIID)
+              APIKEY: $(APIKEY)
+
+  - stage: SAST
+    displayName: '🔒 Veracode Upload & SAST'
+    dependsOn: Build
+    jobs:
+      - job: SASTJob
+        displayName: '🔐 Job Upload & Scan'
+        pool:
+          vmImage: 'windows-latest'
+        steps:
+          - task: DownloadBuildArtifacts@0
+            displayName: '📥 Baixar artefato'
+            inputs:
+              artifactName: 'analysisPack'
+              downloadPath: '$(System.ArtifactsDirectory)'
+
+          - powershell: |
+              $file = Get-ChildItem -Path "$(System.ArtifactsDirectory)\analysisPack" -Filter "verascan.*" | Select-Object -First 1
+              if (-not $file) {
+                Write-Error "❌ Arquivo verascan.* não encontrado para SAST."
+                exit 1
+              }
+              Write-Host "##vso[task.setvariable variable=verascanFilePath]$($file.FullName)"
+            displayName: "📌 Detectar caminho do verascan.*"
+
+          - task: Veracode@3
+            displayName: '📤 Upload & SAST Scan'
+            inputs:
+              ConnectionDetailsSelection: 'Credentials'
+              apiId: '$(APIID)'
+              apiKey: '$(APIKEY)'
+              veracodeAppProfile: '$(veracodeAppProfile)'
+              version: '$(Build.BuildNumber)'
+              filepath: '$(verascanFilePath)'
+              createSandBox: false
+              createProfile: true
+              importResults: false
+              failBuildOnPolicyFail: false
+              selectNewModules: true
+              teams: 'MinhaEquipe'

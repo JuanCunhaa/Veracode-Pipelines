@@ -1,0 +1,5 @@
+- name: 📤 Upload artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: meu-arquivo
+    path: caminho/do/arquivo_ou_pasta

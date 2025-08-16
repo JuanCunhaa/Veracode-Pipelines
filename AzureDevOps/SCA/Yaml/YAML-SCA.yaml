@@ -1,0 +1,29 @@
+# SRCCLR_API_TOKEN no Variable Group 
+
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-22.04'
+
+variables:
+  - group: VeracodeSecrets # Nome do variable group aqui
+
+stages:
+  - stage: SCA
+    displayName: '🔍 Veracode SCA'
+    jobs:
+      - job: SCA
+        displayName: 'SCA Job'
+        pool:
+          vmImage: 'ubuntu-22.04'
+        continueOnError: true
+        steps:
+          - checkout: self
+          - bash: |
+              curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --update-advisor --allow-dirty
+            continueOnError: true
+            env:
+              SRCCLR_API_TOKEN: $(SRCCLR_API_TOKEN)

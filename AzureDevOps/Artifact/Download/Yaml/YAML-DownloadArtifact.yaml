@@ -1,0 +1,6 @@
+- task: DownloadPipelineArtifact@2
+  displayName: 'Download artifact'
+  inputs:
+    artifact: 'analysisPack' # mesmo nome do upload
+    path: '$(Build.ArtifactStagingDirectory)/artifact' # destino local
+    buildType: 'current' # ou 'specific' se quiser outro build

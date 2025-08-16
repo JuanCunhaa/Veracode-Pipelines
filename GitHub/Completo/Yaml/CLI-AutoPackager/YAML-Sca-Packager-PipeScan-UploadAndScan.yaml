@@ -1,0 +1,100 @@
+# APIID, APIKEY e SRCCLR_API_TOKEN nos secrets
+
+name: Veracode SCA + AutoPackager + PipelineScan + UploadAndScan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  veracode-puro:
+    runs-on: ubuntu-latest
+    env:
+      VERACODE_API_KEY_ID: ${{ secrets.VID }}
+      VERACODE_API_KEY_SECRET: ${{ secrets.VKEY }}
+      SRCCLR_API_TOKEN: ${{ secrets.SRCCLR_API_TOKEN }}
+      WRAPPER_VERSION: "25.8.16.1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preparar ambiente
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl jq
+          java -version
+
+      - name: Veracode SCA (SourceClear)
+        run: |
+          set -euo pipefail
+          curl -sSL https://download.sourceclear.com/ci.sh | bash
+          # Um único scan com JSON + logs no console
+          srcclr scan --recursive --json --debug | tee sca-results.json
+
+      - name: Instalar Veracode CLI
+        run: |
+          set -euo pipefail
+          curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+          ./veracode version
+
+      - name: Auto Packager (gera ZIP)
+        id: pack
+        run: |
+          set -euo pipefail
+          out="veracode-out"
+          mkdir -p "$out"
+          ./veracode package --source . --output "$out" --trust --verbose
+          ZIP="$(find "$out" -maxdepth 1 -type f -name '*.zip' | head -n1)"
+          if [ -z "${ZIP:-}" ]; then
+            echo "Nenhum .zip gerado pelo Auto Packager"; exit 1
+          fi
+          echo "artifact=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Pacote gerado: $ZIP"
+
+      - name: Baixar Pipeline Scan CLI
+        run: |
+          set -euo pipefail
+          curl -sSLo pipeline-scan-LATEST.zip https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -oq pipeline-scan-LATEST.zip -d pipeline-scan
+
+      - name: Executar Pipeline Scan
+        run: |
+          set -euo pipefail
+          java -jar pipeline-scan/pipeline-scan.jar \
+            -vid "$VERACODE_API_KEY_ID" \
+            -vkey "$VERACODE_API_KEY_SECRET" \
+            -f "${{ steps.pack.outputs.artifact }}" \
+            --json_output true \
+            --json_output_file "results.json" \
+            --issue_details true \
+            --fail_on_severity "Very High, High"
+
+      - name: Baixar Veracode Java API Wrapper
+        run: |
+          set -euo pipefail
+          base="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${WRAPPER_VERSION}"
+          curl -sSLo veracode-wrapper.jar "$base/vosp-api-wrappers-java-${WRAPPER_VERSION}.jar"
+
+      - name: Executar Upload & Scan
+        run: |
+          set -euo pipefail
+          java -jar veracode-wrapper.jar \
+            -vid "$VERACODE_API_KEY_ID" \
+            -vkey "$VERACODE_API_KEY_SECRET" \
+            -action uploadandscan \
+            -appname "${{ github.repository }}" \
+            -createprofile true \
+            -filepath "${{ steps.pack.outputs.artifact }}" \
+            -version "build-${{ github.run_id }}-${{ github.sha }}" \
+            -deleteincompletescan 2 \
+            -scantimeout 60
+          # Para sandbox, adicione:
+          # -sandboxname "MeuSandbox"
+          # Para policy específica, adicione:
+          # -policy "MinhaPolicy"

@@ -1,0 +1,70 @@
+# APIID e APIKEY definidos no Variable Group
+
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: VeracodeSecrets #Nome do variable group aqui
+  - name: VERACODE_APP_NAME
+    value: $(Build.Repository.Name)
+  - name: FILE_PATH
+    value: 'CAMINHO-DO-ARTEFATO'
+  - name: VERACODE_WRAPPER_VERSION
+    value: '25.8.16.1'
+  - name: VERACODE_VERSION
+    value: $(Build.BuildNumber)
+
+stages:
+- stage: veracode_upload_and_scan
+  jobs:
+  - job: run_on_linux
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+
+    - script: |
+        java -version
+      displayName: 'Check Java'
+
+    - script: |
+        set -e
+        mkdir -p veracode-wrapper
+        curl -sSLo veracode-wrapper/wrapper.zip "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/$(VERACODE_WRAPPER_VERSION)/vosp-api-wrappers-java-$(VERACODE_WRAPPER_VERSION)-dist.zip"
+        unzip -oq veracode-wrapper/wrapper.zip -d veracode-wrapper
+        JAR_PATH="$(ls -1 veracode-wrapper/*/lib/vosp-api-wrapper-java*.jar | head -n 1 || true)"
+        if [ -z "$JAR_PATH" ]; then
+          JAR_PATH="$(ls -1 veracode-wrapper/vosp-api-wrapper-java*.jar | head -n 1 || true)"
+        fi
+        if [ -z "$JAR_PATH" ]; then
+          echo "Jar do Veracode Wrapper não encontrado."
+          exit 1
+        fi
+        echo "##vso[task.setvariable variable=JAR_PATH]$JAR_PATH"
+      displayName: 'Baixar Veracode Java API Wrapper'
+
+    - script: |
+        set -e
+        test -f "$(FILE_PATH)" || (echo "Artefato não encontrado em $(FILE_PATH)"; exit 1)
+      displayName: 'Verificar artefato para upload'
+
+    - script: |
+        set -e
+        java -jar "$(JAR_PATH)" \
+          -vid "$(APIID)" \
+          -vkey "$(APIKEY)" \
+          -action uploadandscan \
+          -appname "$(VERACODE_APP_NAME)" \
+          -createprofile true \
+          -version "$(VERACODE_VERSION)" \
+          -filepath "$(FILE_PATH)" \
+          -scantimeout 60 \
+          -toplevel true \
+          -deleteincompletescan 2
+      displayName: 'Veracode Upload and Scan'
+      env:
+        APIID: $(APIID)
+        APIKEY: $(APIKEY)

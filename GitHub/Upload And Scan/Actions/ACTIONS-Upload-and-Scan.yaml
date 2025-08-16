@@ -1,0 +1,32 @@
+# APIID e APIKEY nos secrets
+
+name: Veracode Upload & Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  upload-and-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🏁 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🚀 Upload & Scan
+        uses: veracode/veracode-uploadandscan-action@0.2.8
+        with:
+          vid: ${{ secrets.VID }}
+          vkey: ${{ secrets.VKEY }}
+          appname: ${{ github.repository }}
+          createprofile: true
+          filepath: analysisPack.zip
+          version: build-${{ github.run_id }}-${{ github.sha }}
+          deleteincompletescan: 2
+          scantimeout: 60
+          # sandboxname: NomeDaSandbox
+          # policy: NomeDaPolicy

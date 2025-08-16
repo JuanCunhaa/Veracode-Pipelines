@@ -1,0 +1,44 @@
+# APIID e APIKEY nos secrets
+
+name: Veracode Upload & Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  upload-and-scan-wrapper:
+    runs-on: ubuntu-latest
+    env:
+      VID: ${{ secrets.VID }}
+      VKEY: ${{ secrets.VKEY }}
+      WRAPPER_VERSION: "25.8.16.1"
+    steps:
+      - name: 🏁 Checkout
+        uses: actions/checkout@v4
+
+      - name: ⬇️ Baixar Veracode Java API Wrapper
+        run: |
+          set -euo pipefail
+          base="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${WRAPPER_VERSION}"
+          curl -sSLo veracode-wrapper.jar "$base/vosp-api-wrappers-java-${WRAPPER_VERSION}.jar"
+
+      - name: 🚀 Upload & Scan
+        run: |
+          set -euo pipefail
+          java -jar veracode-wrapper.jar \
+            -vid "$VID" \
+            -vkey "$VKEY" \
+            -action uploadandscan \
+            -appname "${{ github.repository }}" \
+            -createprofile true \
+            -filepath "analysisPack.zip" \
+            -version "build-${{ github.run_id }}-${{ github.sha }}" \
+            -deleteincompletescan 2 \
+            -scantimeout 60
+            # -sandboxname "MeuSandbox"
+            # -policy "MinhaPolicy"

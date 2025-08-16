@@ -1,0 +1,54 @@
+# APIID e APIKEY nos variable group
+
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - group: VeracodeSecrets #Nome do Variable Group aqui
+
+stages:
+
+  - stage: PipelineScan
+    displayName: '🧪 Veracode Pipeline Scan'
+    dependsOn: Build
+    jobs:
+      - job: PipelineScanJob
+        displayName: '📦 Pipeline Scan Job'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: DownloadBuildArtifacts@0
+            displayName: '📥 Baixar artefato publicado'
+            inputs:
+              artifactName: 'analysisPack'
+              downloadPath: '$(System.ArtifactsDirectory)'
+
+          - bash: |
+              FILE=$(find "$(System.ArtifactsDirectory)/analysisPack" -type f -name "verascan.*" | head -n 1)
+
+              if [ ! -f "$FILE" ]; then
+                echo "❌ Arquivo verascan.* não encontrado."
+                exit 1
+              fi
+
+              echo "✅ Encontrado: $FILE"
+
+              curl -O -L https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+              unzip pipeline-scan-LATEST.zip -d pipeline-scan
+
+              echo "🔍 Executando Pipeline Scan..."
+              java -jar pipeline-scan/pipeline-scan.jar \
+                -vid "$APIID" \
+                -vkey "$APIKEY" \
+                -f "$FILE"
+            displayName: '🧪 Executar Pipeline Scan'
+            env:
+              APIID: $(APIID)
+              APIKEY: $(APIKEY)

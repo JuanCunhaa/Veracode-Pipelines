@@ -1,0 +1,30 @@
+# APIID e APIKEY nos secrets
+
+name: Veracode Pipeline Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  pipeline-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🏁 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔍 Veracode Pipeline Scan
+        uses: veracode/Veracode-pipeline-scan-action@v1.0.9
+        with:
+          vid: ${{ secrets.VID }}
+          vkey: ${{ secrets.VKEY }}
+          file: analysisPack.zip
+          json_output: true
+          json_output_file: results.json
+          issue_details: true
+          fail_on_severity: "Very High, High"

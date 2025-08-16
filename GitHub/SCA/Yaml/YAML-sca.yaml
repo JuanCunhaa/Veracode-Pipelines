@@ -1,0 +1,30 @@
+# SRCCLR_API_TOKEN nos secrets
+
+name: Veracode SCA (SourceClear Puro)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sca-sourceclear:
+    runs-on: ubuntu-latest
+    env:
+      SRCCLR_API_TOKEN: ${{ secrets.SRCCLR_API_TOKEN }}
+    steps:
+      - name: 🏁 Checkout
+        uses: actions/checkout@v4
+
+      - name: ⬇️ Instalar agente SourceClear
+        run: |
+          set -euo pipefail
+          curl -sSL https://download.sourceclear.com/ci.sh | bash
+
+      - name: 🔎 Executar SCA (SourceClear CLI)
+        run: |
+          set -euo pipefail
+          srcclr scan --recursive --json --debug | tee sca-results.json

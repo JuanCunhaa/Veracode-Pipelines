@@ -1,0 +1,37 @@
+# APIID e APIKEY nos secrets
+
+name: Veracode Pipeline Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  pipeline-scan-puro:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🏁 Checkout
+        uses: actions/checkout@v4
+
+      - name: ⬇️ Baixar Pipeline Scan CLI
+        run: |
+          set -euo pipefail
+          curl -sSLo pipeline-scan-LATEST.zip https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -oq pipeline-scan-LATEST.zip -d pipeline-scan
+
+      - name: 🔍 Executar Pipeline Scan (CLI)
+        run: |
+          set -euo pipefail
+          java -jar pipeline-scan/pipeline-scan.jar \
+            -vid "${{ secrets.VID }}" \
+            -vkey "${{ secrets.VKEY }}" \
+            -f "analysisPack.zip" \
+            --json_output true \
+            --json_output_file "results.json" \
+            --issue_details true \
+            --fail_on_severity "Very High, High"

@@ -1,0 +1,91 @@
+# APIID, APIKEY e SRCCLR_API_TOKEN nos secrets
+
+name: Veracode Full (CLI-only: SCA + Packager + PipelineScan + Upload&Scan)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  veracode-cli:
+    runs-on: ubuntu-latest
+    env:
+      VERACODE_API_KEY_ID: ${{ secrets.VID }}
+      VERACODE_API_KEY_SECRET: ${{ secrets.VKEY }}
+      SRCCLR_API_TOKEN: ${{ secrets.SRCCLR_API_TOKEN }}
+      WRAPPER_VERSION: "25.8.16.1"
+    steps:
+      - name: 🏁 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔧 Pré-requisitos
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl jq
+          java -version
+
+      - name: 🧩 Veracode SCA (SCA agent CLI)
+        run: |
+          set -euo pipefail
+          # instala o agente SCA; o backend modernizado é sca-downloads.veracode.com
+          curl -sSL https://sca-downloads.veracode.com/ci.sh | bash
+          # um único scan com JSON + logs (recursive varre subpastas)
+          srcclr scan --recursive --json --debug | tee sca-results.json
+
+      - name: ⬇️ Instalar Veracode CLI
+        run: |
+          set -euo pipefail
+          curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+          ./veracode version
+
+      - name: 📦 Auto Packager (gera .zip)
+        id: pack
+        run: |
+          set -euo pipefail
+          out="veracode-out"
+          mkdir -p "$out"
+          # empacota projeto para Static Analysis ou SCA upload
+          ./veracode package --source . --output "$out" --trust --verbose
+          ZIP="$(find "$out" -maxdepth 1 -type f -name '*.zip' | head -n1)"
+          if [ -z "${ZIP:-}" ]; then
+            echo "Nenhum .zip gerado pelo Auto Packager"; exit 1
+          fi
+          echo "artifact=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "✅ Pacote: $ZIP"
+
+      - name: 🔍 Pipeline Scan (Veracode CLI)
+        run: |
+          set -euo pipefail
+          ./veracode static scan "${{ steps.pack.outputs.artifact }}" \
+            --results-file results.json \
+            --summary-output results.txt \
+            --fail-on-severity "Very High, High" \
+            --verbose
+
+      - name: ⬇️ Baixar Veracode Java API Wrapper
+        run: |
+          set -euo pipefail
+          base="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${WRAPPER_VERSION}"
+          curl -sSLo veracode-wrapper.jar "$base/vosp-api-wrappers-java-${WRAPPER_VERSION}.jar"
+
+      - name: 🚀 Upload & Scan (Java Wrapper)
+        run: |
+          set -euo pipefail
+          java -jar veracode-wrapper.jar \
+            -vid "$VERACODE_API_KEY_ID" \
+            -vkey "$VERACODE_API_KEY_SECRET" \
+            -action uploadandscan \
+            -appname "${{ github.repository }}" \
+            -createprofile true \
+            -filepath "${{ steps.pack.outputs.artifact }}" \
+            -version "build-${{ github.run_id }}-${{ github.sha }}" \
+            -deleteincompletescan 2 \
+            -scantimeout 60
+          # Para sandbox: adicione ->  -sandboxname "MeuSandbox"
+          # Para policy específica: ->  -policy "MinhaPolicy"

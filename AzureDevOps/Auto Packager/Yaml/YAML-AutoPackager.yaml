@@ -1,0 +1,32 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-22.04'
+
+variables:
+  - group: VeracodeSecrets # Nome do variable group aqui
+
+stages:
+  - stage: AutoPackager
+    displayName: '📦 Veracode AutoPackager'
+    jobs:
+      - job: package
+        displayName: 'Gerar analysisPack.zip'
+        steps:
+          - checkout: self
+
+          - bash: |
+              set -e
+              echo "📦 Instalando Veracode CLI..."
+              curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+
+              echo "📦 Gerando analysisPack.zip via Veracode CLI..."
+              ./veracode package \
+                --source . \
+                --output "CAMINHO-DO-ARTEFATO" \ # Aqui é onde fica o arquivo final pós packager
+                --trust \
+                --verbose
+            displayName: 'Executar Veracode AutoPackager'
