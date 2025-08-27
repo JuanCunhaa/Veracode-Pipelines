@@ -1,0 +1,264 @@
+name: Veracode Workflow (Builds + Pipeline Scan + SAST)
+
+on:
+  workflow_call:
+    inputs:
+      build_artifact_name:
+        type: string
+        required: true
+        description: 'Name of the build artifact uploaded in the build step'
+      build_artifact_path:
+        type: string
+        required: true
+        description: 'The file paths of the build artifacts uploaded in the build step'
+      build_artifact_exclude_patterns:
+        type: string
+        required: false
+        default: ''
+        description: 'Comma separated exclude patterns for files that dont need to be scanned (ex: test code)'
+      project_name:
+        type: string
+        required: false
+        default: ''
+        description: 'Project name. If left empty, the repository name will be used'
+    secrets:
+      SCAN_API_TOKEN:
+        description: 'Veracode SCA API Token'
+        required: true
+      SCAN_API_ID:
+        description: 'Veracode API ID'
+        required: true
+      SCAN_API_KEY:
+        description: 'Veracode API KEY'
+        required: true
+
+jobs:
+
+  # --------------------------------
+  # 🧰 Auto Packager -> analysisPack.zip (a partir do artifact original)
+  # --------------------------------
+  autopackager:
+    name: Veracode Auto Packager
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔽 Download build artifact (original)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.build_artifact_name }}
+          path: ${{ inputs.build_artifact_path }}
+
+      - name: ⬇️ Instalar Veracode CLI
+        run: |
+          set -euo pipefail
+          curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+          ./veracode version
+
+      - name: 📦 Executar Auto Packager (verbose) no artifact baixado
+        run: |
+          set -euo pipefail
+          SRC_DIR="${{ inputs.build_artifact_path }}"
+          out_dir="veracode-out"
+          mkdir -p "$out_dir"
+          ./veracode package --source "$SRC_DIR" --output "$out_dir" --trust --verbose
+          echo "✅ Pacotes gerados:"
+          ls -lh "$out_dir"
+
+      - name: 🧩 Compilar pacotes em analysisPack.zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARTIFACT_DIR="${GITHUB_WORKSPACE}/veracode-out"
+
+          sudo apt-get update -y
+          sudo apt-get install -y zip unzip
+
+          cd "${ARTIFACT_DIR}"
+
+          mkdir -p merged
+
+          echo "Procurando arquivos .zip em ${ARTIFACT_DIR}"
+          shopt -s nullglob
+          zips=( *.zip )
+          if [ ${#zips[@]} -gt 0 ]; then
+            for zipf in "${zips[@]}"; do
+              echo "Extraindo $zipf para merged/"
+              unzip -oq "$zipf" -d merged/
+            done
+          else
+            echo "Nenhum arquivo .zip encontrado (ok, seguiremos apenas com as pastas/arquivos gerados)."
+          fi
+
+          for item in *; do
+            if [[ "$item" != "merged" && "$item" != *.zip ]]; then
+              echo "Movendo $item para merged/"
+              mv "$item" merged/
+            fi
+          done
+
+          echo "Compactando tudo em analysisPack.zip"
+          rm -f /tmp/analysisPack.zip
+          (cd merged && zip -qr /tmp/analysisPack.zip .)
+
+          echo "Limpando ${ARTIFACT_DIR}"
+          rm -rf ./*
+
+          mv /tmp/analysisPack.zip ./analysisPack.zip
+
+          echo "Novo pacote pronto: ${ARTIFACT_DIR}/analysisPack.zip"
+          ls -lh "${ARTIFACT_DIR}/analysisPack.zip"
+
+      - name: 📤 Upload analysisPack.zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysisPack
+          path: veracode-out/analysisPack.zip
+
+  # --------------------------------
+  # 🔍 Veracode SCA (inalterado)
+  # --------------------------------
+  sca:
+    name: Veracode SCA
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Check for SCA Secrets
+        id: check_sca_secrets
+        run: |
+          if [[ -n "${{ secrets.SCAN_API_TOKEN }}" ]]; then
+            echo "run_scan=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_scan=false" >> $GITHUB_OUTPUT
+            echo "::warning::SCA scan skipped because SCAN_API_TOKEN secret is not set."
+          fi
+
+      - name: Run Veracode SCA
+        if: steps.check_sca_secrets.outputs.run_scan == 'true'
+        env:
+          SRCCLR_API_TOKEN: ${{ secrets.SCAN_API_TOKEN }}
+        run: |
+          echo "🔍 Starting Veracode SCA..."
+          curl -sSL 'https://download.sourceclear.com/ci.sh' | bash -s -- scan
+
+  # --------------------------------
+  # 🔍 Pipeline Scan (lendo o novo artifact: analysisPack)
+  # --------------------------------
+  pipeline_scan:
+    name: Pipeline Scan
+    runs-on: ubuntu-latest
+    needs: [sca, autopackager]
+    if: always()
+    steps:
+      - name: Download analysisPack artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: analysisPack
+          path: ${{ inputs.build_artifact_path }}
+
+      - name: Preparar arquivo para o scan (evitar zip duplo)
+        id: prepare_scan_file
+        env:
+          EXCLUDE_PATTERNS: ${{ inputs.build_artifact_exclude_patterns }}
+        run: |
+          set -euo pipefail
+          WORKDIR="${{ inputs.build_artifact_path }}"
+          echo "Conteúdo do path:"
+          ls -lah "$WORKDIR" || true
+
+          # Se já existe analysisPack.zip, usar direto
+          if [ -f "$WORKDIR/analysisPack.zip" ]; then
+            echo "file=$WORKDIR/analysisPack.zip" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Caso não exista (situação rara), fazer zip do diretório como fallback
+          if [[ -n "${EXCLUDE_PATTERNS}" ]]; then
+            IFS=',' read -ra EXCLUDE_PATTERNS_ARRAY <<< "${EXCLUDE_PATTERNS}"
+            (cd "$(dirname "$WORKDIR")" && zip -r "${WORKDIR}.zip" "$(basename "$WORKDIR")" -x "${EXCLUDE_PATTERNS_ARRAY[@]}")
+          else
+            (cd "$(dirname "$WORKDIR")" && zip -r "${WORKDIR}.zip" "$(basename "$WORKDIR")")
+          fi
+          echo "file=${WORKDIR}.zip" >> $GITHUB_OUTPUT
+
+      - name: Check for SAST/Pipeline Secrets
+        id: check_sast_secrets
+        run: |
+          if [[ -n "${{ secrets.SCAN_API_ID }}" && -n "${{ secrets.SCAN_API_KEY }}" ]]; then
+            echo "run_scan=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_scan=false" >> $GITHUB_OUTPUT
+            echo "::warning::Pipeline scan skipped because SCAN_API_ID or SCAN_API_KEY secrets are not set."
+          fi
+
+      - name: Run Veracode Pipeline Scan
+        if: steps.check_sast_secrets.outputs.run_scan == 'true'
+        uses: veracode/Veracode-pipeline-scan-action@v1.0.18
+        with:
+          vid: ${{ secrets.SCAN_API_ID }}
+          vkey: ${{ secrets.SCAN_API_KEY }}
+          file: ${{ steps.prepare_scan_file.outputs.file }}
+          fail_build: false
+
+  # --------------------------------
+  # 🔒 Veracode Upload & SAST (lendo o novo artifact: analysisPack)
+  # --------------------------------
+  sast:
+    name: Veracode Upload & SAST
+    runs-on: ubuntu-latest
+    needs: [pipeline_scan]
+    if: always()
+    steps:
+      - name: Download analysisPack artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: analysisPack
+          path: ${{ inputs.build_artifact_path }}
+
+      - name: Preparar arquivo para o SAST (evitar zip duplo)
+        id: prepare_sast_file
+        env:
+          EXCLUDE_PATTERNS: ${{ inputs.build_artifact_exclude_patterns }}
+        run: |
+          set -euo pipefail
+          WORKDIR="${{ inputs.build_artifact_path }}"
+          echo "Conteúdo do path:"
+          ls -lah "$WORKDIR" || true
+
+          if [ -f "$WORKDIR/analysisPack.zip" ]; then
+            echo "file=$WORKDIR/analysisPack.zip" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [[ -n "${EXCLUDE_PATTERNS}" ]]; then
+            IFS=',' read -ra EXCLUDE_PATTERNS_ARRAY <<< "${EXCLUDE_PATTERNS}"
+            (cd "$(dirname "$WORKDIR")" && zip -r "${WORKDIR}.zip" "$(basename "$WORKDIR")" -x "${EXCLUDE_PATTERNS_ARRAY[@]}")
+          else
+            (cd "$(dirname "$WORKDIR")" && zip -r "${WORKDIR}.zip" "$(basename "$WORKDIR")")
+          fi
+          echo "file=${WORKDIR}.zip" >> $GITHUB_OUTPUT
+
+      - name: Check for SAST/Pipeline Secrets
+        id: check_sast_secrets
+        run: |
+          if [[ -n "${{ secrets.SCAN_API_ID }}" && -n "${{ secrets.SCAN_API_KEY }}" ]]; then
+            echo "run_scan=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_scan=false" >> $GITHUB_OUTPUT
+            echo "::warning::SAST scan skipped because SCAN_API_ID or SCAN_API_KEY secrets are not set."
+          fi
+
+      - name: Run Veracode Upload & SAST
+        if: steps.check_sast_secrets.outputs.run_scan == 'true'
+        uses: veracode/veracode-uploadandscan-action@0.2.8
+        env:
+          PROJECT_NAME: ${{ inputs.project_name != '' && inputs.project_name || github.repository }}
+        with:
+          vid: ${{ secrets.SCAN_API_ID }}
+          vkey: ${{ secrets.SCAN_API_KEY }}
+          appname: "GitHub - ${{ env.PROJECT_NAME }}"
+          createprofile: true
+          filepath: ${{ steps.prepare_sast_file.outputs.file }}
+          version: "${{ github.run_id }}-${{ github.run_attempt }}"
+          deleteincompletescan: 2
