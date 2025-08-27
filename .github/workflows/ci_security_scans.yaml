@@ -5,12 +5,14 @@ on:
     inputs:
       build_artifact_name:
         type: string
-        required: true
+        required: false
+        default: 'build-artifact'
         description: 'Name of the build artifact uploaded in the build step'
       build_artifact_path:
         type: string
-        required: true
-        description: 'The file paths of the build artifacts uploaded in the build step'
+        required: false
+        default: 'build'
+        description: 'The file path where the build artifact will be downloaded/extracted'
       build_artifact_exclude_patterns:
         type: string
         required: false
@@ -158,13 +160,11 @@ jobs:
           echo "Conteúdo do path:"
           ls -lah "$WORKDIR" || true
 
-          # Se já existe analysisPack.zip, usar direto
           if [ -f "$WORKDIR/analysisPack.zip" ]; then
             echo "file=$WORKDIR/analysisPack.zip" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Caso não exista (situação rara), fazer zip do diretório como fallback
           if [[ -n "${EXCLUDE_PATTERNS}" ]]; then
             IFS=',' read -ra EXCLUDE_PATTERNS_ARRAY <<< "${EXCLUDE_PATTERNS}"
             (cd "$(dirname "$WORKDIR")" && zip -r "${WORKDIR}.zip" "$(basename "$WORKDIR")" -x "${EXCLUDE_PATTERNS_ARRAY[@]}")
