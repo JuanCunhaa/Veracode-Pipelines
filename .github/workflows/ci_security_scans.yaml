@@ -34,9 +34,6 @@ on:
 
 jobs:
 
-  # --------------------------------
-  # 🧰 Auto Packager -> analysisPack.zip (a partir do artifact original)
-  # --------------------------------
   autopackager:
     name: Veracode Auto Packager
     runs-on: ubuntu-latest
@@ -114,9 +111,6 @@ jobs:
           name: analysisPack
           path: veracode-out/analysisPack.zip
 
-  # --------------------------------
-  # 🔍 Veracode SCA (inalterado)
-  # --------------------------------
   sca:
     name: Veracode SCA
     runs-on: ubuntu-latest
@@ -142,9 +136,6 @@ jobs:
           echo "🔍 Starting Veracode SCA..."
           curl -sSL 'https://download.sourceclear.com/ci.sh' | bash -s -- scan
 
-  # --------------------------------
-  # 🔍 Pipeline Scan (lendo o novo artifact: analysisPack)
-  # --------------------------------
   pipeline_scan:
     name: Pipeline Scan
     runs-on: ubuntu-latest
@@ -201,9 +192,6 @@ jobs:
           file: ${{ steps.prepare_scan_file.outputs.file }}
           fail_build: false
 
-  # --------------------------------
-  # 🔒 Veracode Upload & SAST (lendo o novo artifact: analysisPack)
-  # --------------------------------
   sast:
     name: Veracode Upload & SAST
     runs-on: ubuntu-latest
