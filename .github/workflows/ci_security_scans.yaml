@@ -46,13 +46,94 @@ jobs:
           name: ${{ inputs.build_artifact_name }}
           path: ${{ inputs.build_artifact_path }}
 
+      - name: 🔎 Pré-checagem de binários (.dll/.pdb/.jar/.war) e empacotamento
+        id: precheck_binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WORKDIR="${{ inputs.build_artifact_path }}"
+          echo "Varredura recursiva em: $WORKDIR"
+          
+          if [[ -z "${WORKDIR:-}" ]]; then
+            echo "ERRO: WORKDIR está vazio."; exit 1
+          fi
+          if [[ ! -d "$WORKDIR" ]]; then
+            echo "ERRO: WORKDIR não existe: $WORKDIR"; exit 1
+          fi
+          WORKDIR_ABS="$(cd "$WORKDIR" && pwd -P)"
+          if [[ -z "$WORKDIR_ABS" || "$WORKDIR_ABS" == "/" ]]; then
+            echo "ERRO: WORKDIR resolve para raiz; abortando."; exit 1
+          fi
+
+          if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+            WS_ABS="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+            case "$WORKDIR_ABS" in
+              "$WS_ABS"/*|"$WS_ABS") : ;; # ok
+              *) echo "ERRO: WORKDIR não está dentro de GITHUB_WORKSPACE."; exit 1 ;;
+            esac
+          fi
+
+          sudo apt-get update -y
+          sudo apt-get install -y zip unzip
+
+          OUT_DIR="${GITHUB_WORKSPACE}/veracode-out"
+          mkdir -p "$OUT_DIR"
+
+          BUNDLE_DIR="$(mktemp -d)"
+          trap 'rm -rf "$BUNDLE_DIR"' EXIT
+
+          FOUND_ANY=false
+
+          while IFS= read -r -d '' f; do
+            FOUND_ANY=true
+            base="$(basename "$f")"
+            # Trata colisão por basename
+            if [[ -e "$BUNDLE_DIR/$base" ]]; then
+              i=1
+              while [[ -e "$BUNDLE_DIR/${i}_$base" ]]; do i=$((i+1)); done
+              cp -f -- "$f" "$BUNDLE_DIR/${i}_$base"
+              echo "Adicionado (colisão): ${i}_$base"
+            else
+              cp -f -- "$f" "$BUNDLE_DIR/$base"
+              echo "Adicionado: $base"
+            fi
+          done < <(
+            find "$WORKDIR_ABS" \
+              \( -type d \( -name node_modules -o -name .git -o -name .svn -o -name .hg -o -name vendor -o -name .m2 -o -name .gradle -o -name .ivy2 -o -name .pnpm-store -o -name .yarn -o -name .cache -o -name .venv -o -name venv -o -name .terraform \) -prune \) -o \
+              \( -type f \( -iname '*.dll' -o -iname '*.pdb' -o -iname '*.jar' -o -iname '*.war' \) -print0 \)
+          )
+
+          if $FOUND_ANY; then
+            echo "Arquivos compilados detectados; gerando pacote..."
+            (cd "$BUNDLE_DIR" && zip -qr "$OUT_DIR/analysisPack.zip" .)
+
+            shopt -s dotglob nullglob
+            CONTENTS=("$WORKDIR_ABS"/*)
+            if ((${#CONTENTS[@]})); then
+              rm -rf -- "${CONTENTS[@]}"
+            fi
+            shopt -u dotglob nullglob
+
+            cp -f -- "$OUT_DIR/analysisPack.zip" "$WORKDIR_ABS/analysisPack.zip"
+
+            echo "skip_packager=true" >> "$GITHUB_OUTPUT"
+            echo "Fluxo alternativo - Arquivos compilados detectados."
+          else
+            echo "Fluxo original - Nenhum arquivo compilado detectado."
+            echo "skip_packager=false" >> "$GITHUB_OUTPUT"
+          fi
+
+
       - name: ⬇️ Instalar Veracode CLI
+        if: steps.precheck_binaries.outputs.skip_packager == 'false'
         run: |
           set -euo pipefail
           curl -fsS https://tools.veracode.com/veracode-cli/install | sh
           ./veracode version
 
       - name: 📦 Executar Auto Packager (verbose) no artifact baixado
+        if: steps.precheck_binaries.outputs.skip_packager == 'false'
         run: |
           set -euo pipefail
           SRC_DIR="${{ inputs.build_artifact_path }}"
@@ -63,6 +144,7 @@ jobs:
           ls -lh "$out_dir"
 
       - name: 🧩 Compilar pacotes em analysisPack.zip
+        if: steps.precheck_binaries.outputs.skip_packager == 'false'
         shell: bash
         run: |
           set -euo pipefail
