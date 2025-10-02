@@ -332,3 +332,16 @@ jobs:
           filepath: ${{ steps.prepare_sast_file.outputs.file }}
           version: "${{ github.run_id }}-${{ github.run_attempt }}"
           deleteincompletescan: 2
+
+      - name: Capturar AppID
+        if: steps.check_sast_secrets.outputs.run_scan == 'true'
+        run: |
+          APPID=$(cat $GITHUB_STEP_SUMMARY | grep -oP 'App ID: \K[0-9]+')
+          echo "APPID=$APPID" >> $GITHUB_ENV
+          echo "📌 AppID capturado: $APPID"
+
+      - name: Obter AppID pela API
+        run: |
+          curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
+            "https://analysiscenter.veracode.com/api/5.0/getapplist.do" \
+            | xmllint --xpath "//application[@app_name='GitHub - ${{ env.PROJECT_NAME }}']/@app_id" -
