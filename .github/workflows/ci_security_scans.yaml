@@ -125,6 +125,7 @@ jobs:
           else
             echo "Fluxo original - Nenhum arquivo compilado detectado."
             echo "skip_packager=false" >> "$GITHUB_OUTPUT"
+
           fi
 
       - name: ⬇️ Instalar Veracode CLI
@@ -339,83 +340,85 @@ jobs:
           deleteincompletescan: 2
 
       # ⚡️ Java via setup-java (cacheado) + wrapper do Maven Central + parsing do XML em Python (sem apt)
+      - name: Setup Java
+        if: steps.check_sast_secrets.outputs.run_scan == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Get AppID/BuildID via Java API Wrapper (rápido, sem apt)
         id: get_ids
         if: steps.check_sast_secrets.outputs.run_scan == 'true'
         env:
           PROJECT_NAME: ${{ inputs.project_name != '' && inputs.project_name || github.repository }}
           VERSION_TAG: "${{ github.run_id }}-${{ github.run_attempt }}"
-        steps:
-          - name: Setup Java
-            uses: actions/setup-java@v4
-            with:
-              distribution: temurin
-              java-version: "17"
+        run: |
+          set -euo pipefail
+          APP_NAME="GitHub - ${PROJECT_NAME}"
+          echo "🔎 Procurando APP pelo nome: ${APP_NAME}"
 
-          - name: Baixar wrapper e obter applist
-            run: |
-              set -euo pipefail
-              APP_NAME="GitHub - ${PROJECT_NAME}"
-              echo "🔎 Procurando APP pelo nome: ${APP_NAME}"
+          WRAPPER_URL="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/25.8.16.1/vosp-api-wrappers-java-25.8.16.1.jar"
+          curl -fsSL "$WRAPPER_URL" -o vosp-api-wrappers-java-25.8.16.1.jar
+          ln -sf vosp-api-wrappers-java-25.8.16.1.jar VeracodeJavaAPI.jar
 
-              WRAPPER_URL="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/25.8.16.1/vosp-api-wrappers-java-25.8.16.1.jar"
-              curl -fsSL "$WRAPPER_URL" -o vosp-api-wrappers-java-25.8.16.1.jar
-              ln -sf vosp-api-wrappers-java-25.8.16.1.jar VeracodeJavaAPI.jar
+          # Executa getapplist e salva XML
+          java -jar VeracodeJavaAPI.jar \
+            -action getapplist \
+            -vid "${{ secrets.SCAN_API_ID }}" \
+            -vkey "${{ secrets.SCAN_API_KEY }}" > applist.xml 2>/dev/null || true
 
-              # Executa getapplist e salva XML
-              java -jar VeracodeJavaAPI.jar \
-                -action getapplist \
-                -vid "${{ secrets.SCAN_API_ID }}" \
-                -vkey "${{ secrets.SCAN_API_KEY }}" > applist.xml 2>/dev/null || true
+          if [[ ! -s "applist.xml" ]]; then
+            echo "::error::applist.xml não foi gerado."
+            exit 1
+          fi
 
-              if [[ ! -s "applist.xml" ]]; then
-                echo "::error::applist.xml não foi gerado."
-                exit 1
-              fi
+          # Extrai APP_ID com Python (sem dependências extras)
+          APP_ID="$(
+          python3 - "$APP_NAME" <<'PY'
+import sys, xml.etree.ElementTree as ET
+APP_NAME = sys.argv[1]
+root = ET.parse('applist.xml').getroot()
+def lname(t): return t.split('}',1)[-1]
+app_id = ''
+for el in root.iter():
+    if lname(el.tag) in ('app','application') and el.attrib.get('app_name') == APP_NAME:
+        app_id = el.attrib.get('app_id','')
+        break
+print(app_id, end='')
+PY
+          )"
 
-              # Extrai APP_ID com Python (sem dependências extras)
-              APP_ID="$(python3 - <<'PY'
-              import sys, xml.etree.ElementTree as ET
-              APP_NAME = sys.argv[1]
-              root = ET.parse('applist.xml').getroot()
-              def lname(t): return t.split('}',1)[-1]
-              app_id = ''
-              for el in root.iter():
-                  if lname(el.tag) in ('app','application') and el.attrib.get('app_name') == APP_NAME:
-                      app_id = el.attrib.get('app_id','')
-                      break
-              print(app_id, end='')
-              PY
-              "$APP_NAME")"
+          if [[ -z "$APP_ID" ]]; then
+            echo "::error::app_id não encontrado para '${APP_NAME}'"
+            exit 1
+          fi
+          echo "✅ APPID: $APP_ID"
 
-              if [[ -z "$APP_ID" ]]; then
-                echo "::error::app_id não encontrado para '${APP_NAME}'"
-                exit 1
-              fi
-              echo "✅ APPID: $APP_ID"
+          # Busca BUILD_ID via getbuildlist
+          BUILD_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
+            "https://analysiscenter.veracode.com/api/5.0/getbuildlist.do?app_id=${APP_ID}")"
 
-              # Busca BUILD_ID via getbuildlist (curl já está no runner)
-              BUILD_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
-                "https://analysiscenter.veracode.com/api/5.0/getbuildlist.do?app_id=${APP_ID}")"
+          BUILD_ID="$(
+          python3 - "$VERSION_TAG" <<'PY'
+import sys, xml.etree.ElementTree as ET
+from io import StringIO
+version = sys.argv[1]
+xml = sys.stdin.read()
+root = ET.parse(StringIO(xml)).getroot()
+def lname(t): return t.split('}',1)[-1]
+bid = ''
+for el in root.iter():
+    if lname(el.tag) == 'build' and el.attrib.get('version') == version:
+        bid = el.attrib.get('build_id','')
+        break
+print(bid, end='')
+PY
+          <<< "$BUILD_XML"
+          )"
 
-              BUILD_ID="$(python3 - <<'PY'
-              import sys, xml.etree.ElementTree as ET
-              from io import StringIO
-              xml = sys.stdin.read()
-              version = sys.argv[1]
-              root = ET.parse(StringIO(xml)).getroot()
-              def lname(t): return t.split('}',1)[-1]
-              bid = ''
-              for el in root.iter():
-                  if lname(el.tag) == 'build' and el.attrib.get('version') == version:
-                      bid = el.attrib.get('build_id','')
-                      break
-              print(bid, end='')
-              PY
-              "$VERSION_TAG" <<< "$BUILD_XML")"
+          echo "app_id=${APP_ID}"   >> "$GITHUB_OUTPUT"
+          echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
 
-              echo "app_id=${APP_ID}"   >> "$GITHUB_OUTPUT"
-              echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
-
-              echo "📌 AppID: ${APP_ID}"
-              echo "📌 BuildID: ${BUILD_ID:-<não encontrado p/ essa versão>}"
+          echo "📌 AppID: ${APP_ID}"
+          echo "📌 BuildID: ${BUILD_ID:-<não encontrado p/ essa versão>}"
