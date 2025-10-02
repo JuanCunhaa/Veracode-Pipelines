@@ -92,7 +92,6 @@ jobs:
           while IFS= read -r -d '' f; do
             FOUND_ANY=true
             base="$(basename "$f")"
-            # Trata colisão por basename
             if [[ -e "$BUNDLE_DIR/$base" ]]; then
               i=1
               while [[ -e "$BUNDLE_DIR/${i}_$base" ]]; do i=$((i+1)); done
@@ -127,7 +126,6 @@ jobs:
             echo "Fluxo original - Nenhum arquivo compilado detectado."
             echo "skip_packager=false" >> "$GITHUB_OUTPUT"
           fi
-
 
       - name: ⬇️ Instalar Veracode CLI
         if: steps.precheck_binaries.outputs.skip_packager == 'false'
@@ -340,8 +338,8 @@ jobs:
           version: "${{ github.run_id }}-${{ github.run_attempt }}"
           deleteincompletescan: 2
 
-      # 🔎 XML API para pegar APPID/BUILDID de forma robusta
-      - name: Get AppID/BuildID via XML API (recomendado)
+      # 🔽 Baixar o Java API Wrapper e executar `-action getapplist`, depois extrair o APPID
+      - name: Get AppID/BuildID via Java API Wrapper (com fallback XML)
         id: get_ids
         if: steps.check_sast_secrets.outputs.run_scan == 'true'
         env:
@@ -349,27 +347,64 @@ jobs:
           VERSION_TAG: "${{ github.run_id }}-${{ github.run_attempt }}"
         run: |
           set -euo pipefail
-          sudo apt-get update -y && sudo apt-get install -y libxml2-utils curl
+          sudo apt-get update -y && sudo apt-get install -y default-jre libxml2-utils curl
 
           APP_NAME="GitHub - ${PROJECT_NAME}"
-          echo "Procurando app: ${APP_NAME}"
+          echo "🔎 Procurando APP pelo nome: ${APP_NAME}"
 
-          # 1) APP ID
-          APP_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
-            "https://analysiscenter.veracode.com/api/5.0/getapplist.do")"
+          # Tentativas de download do Java API Wrapper
+          WRAPPER="VeracodeJavaAPI.jar"
+          urls=(
+            "https://downloads.veracode.com/securityscan/VeracodeJavaAPI.jar"
+            "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/java/VeracodeJavaAPI/25.8.16.1/VeracodeJavaAPI-25.8.16.1.jar"
+          )
+          got=""
+          for u in "${urls[@]}"; do
+            echo "Baixando wrapper de: $u"
+            if curl -fsSL "$u" -o "$WRAPPER"; then
+              got="yes"
+              break
+            fi
+          done
 
-          APP_ID="$(echo "$APP_XML" | xmllint --xpath "string(//application[@app_name='${APP_NAME}']/@app_id)" - 2>/dev/null || true)"
+          APP_ID=""
+          BUILD_ID=""
+
+          if [[ -n "$got" && -s "$WRAPPER" ]]; then
+            echo "✅ Wrapper baixado. Rodando: getapplist"
+            # Executa getapplist com credenciais
+            java -jar "$WRAPPER" \
+              -action getapplist \
+              -vid "${{ secrets.SCAN_API_ID }}" \
+              -vkey "${{ secrets.SCAN_API_KEY }}" > applist.xml 2>/dev/null || true
+
+            if [[ -s "applist.xml" ]]; then
+              # Extrai o app_id do XML gerado pelo wrapper
+              APP_ID="$(xmllint --xpath "string(//*[local-name()='application' or local-name()='app'][@app_name='${APP_NAME}']/@app_id)" applist.xml 2>/dev/null || true)"
+            fi
+          else
+            echo "⚠️ Não foi possível baixar o wrapper. Indo para fallback via XML API."
+          fi
+
+          # Fallback direto na XML API (caso o wrapper não traga o dado)
+          if [[ -z "$APP_ID" ]]; then
+            echo "Usando fallback: getapplist.do via XML API"
+            APP_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
+              "https://analysiscenter.veracode.com/api/5.0/getapplist.do")"
+            APP_ID="$(echo "$APP_XML" | xmllint --xpath "string(//*[local-name()='application' or local-name()='app'][@app_name='${APP_NAME}']/@app_id)" - 2>/dev/null || true)"
+          fi
 
           if [[ -z "$APP_ID" ]]; then
             echo "::error::app_id não encontrado para '${APP_NAME}'"
             exit 1
           fi
 
-          # 2) BUILD ID pelo version usado no uploadandscan
+          echo "✅ APPID: $APP_ID"
+
+          # Obter BUILD_ID (pela versão usada no uploadandscan)
           BUILD_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
             "https://analysiscenter.veracode.com/api/5.0/getbuildlist.do?app_id=${APP_ID}")"
-
-          BUILD_ID="$(echo "$BUILD_XML" | xmllint --xpath "string(//build[@version='${VERSION_TAG}']/@build_id)" - 2>/dev/null || true)"
+          BUILD_ID="$(echo "$BUILD_XML" | xmllint --xpath "string(//*[local-name()='build'][@version='${VERSION_TAG}']/@build_id)" - 2>/dev/null || true)"
 
           echo "app_id=${APP_ID}"   >> "$GITHUB_OUTPUT"
           echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
