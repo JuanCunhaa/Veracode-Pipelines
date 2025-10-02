@@ -37,7 +37,7 @@ on:
 permissions:
   contents: read
   actions: read
-  
+
 jobs:
 
   autopackager:
@@ -283,9 +283,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [pipeline_scan]
     if: always()
+    outputs:
+      app_id: ${{ steps.get_ids.outputs.app_id }}
+      build_id: ${{ steps.get_ids.outputs.build_id }}
     steps:
       - name: Download analysisPack artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: analysisPack
           path: ${{ inputs.build_artifact_path }}
@@ -337,33 +340,39 @@ jobs:
           version: "${{ github.run_id }}-${{ github.run_attempt }}"
           deleteincompletescan: 2
 
-      - name: Baixar logs do workflow run e extrair AppID (alternativa)
+      # 🔎 XML API para pegar APPID/BUILDID de forma robusta
+      - name: Get AppID/BuildID via XML API (recomendado)
+        id: get_ids
         if: steps.check_sast_secrets.outputs.run_scan == 'true'
+        env:
+          PROJECT_NAME: ${{ inputs.project_name != '' && inputs.project_name || github.repository }}
+          VERSION_TAG: "${{ github.run_id }}-${{ github.run_attempt }}"
         run: |
           set -euo pipefail
-          sudo apt-get update -y && sudo apt-get install -y unzip curl jq
+          sudo apt-get update -y && sudo apt-get install -y libxml2-utils curl
 
-          RUN_ID=${{ github.run_id }}
-          REPO="${{ github.repository }}"
-          OWNER=$(echo "$REPO" | cut -d'/' -f1)
-          REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+          APP_NAME="GitHub - ${PROJECT_NAME}"
+          echo "Procurando app: ${APP_NAME}"
 
-          echo "Baixando logs para run_id=$RUN_ID ..."
-          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/${REPO_NAME}/actions/runs/${RUN_ID}/logs" \
-            -o /tmp/run-logs.zip
+          # 1) APP ID
+          APP_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
+            "https://analysiscenter.veracode.com/api/5.0/getapplist.do")"
 
-          unzip -q /tmp/run-logs.zip -d /tmp/run-logs
-          # procurar por arquivo de log do job/step que rodou o action
-          grep -R --line-number "appid=" /tmp/run-logs || true
-          # exemplo simples: extrair appid de qualquer arquivo de log
-          APPID=$(grep -oP 'appid=\K[0-9]+' /tmp/run-logs/* | head -n1 || true)
+          APP_ID="$(echo "$APP_XML" | xmllint --xpath "string(//application[@app_name='${APP_NAME}']/@app_id)" - 2>/dev/null || true)"
 
-          if [[ -z "$APPID" ]]; then
-            echo "APPID não encontrado nos logs baixados."
+          if [[ -z "$APP_ID" ]]; then
+            echo "::error::app_id não encontrado para '${APP_NAME}'"
             exit 1
           fi
 
-          echo "app_id=$APPID" >> $GITHUB_OUTPUT
-          echo "APPID extraído dos logs: $APPID"
+          # 2) BUILD ID pelo version usado no uploadandscan
+          BUILD_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
+            "https://analysiscenter.veracode.com/api/5.0/getbuildlist.do?app_id=${APP_ID}")"
+
+          BUILD_ID="$(echo "$BUILD_XML" | xmllint --xpath "string(//build[@version='${VERSION_TAG}']/@build_id)" - 2>/dev/null || true)"
+
+          echo "app_id=${APP_ID}"   >> "$GITHUB_OUTPUT"
+          echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
+
+          echo "📌 AppID: ${APP_ID}"
+          echo "📌 BuildID: ${BUILD_ID:-<não encontrado p/ essa versão>}"
