@@ -125,7 +125,6 @@ jobs:
           else
             echo "Fluxo original - Nenhum arquivo compilado detectado."
             echo "skip_packager=false" >> "$GITHUB_OUTPUT"
-
           fi
 
       - name: ⬇️ Instalar Veracode CLI
@@ -265,7 +264,7 @@ jobs:
             echo "run_scan=true" >> $GITHUB_OUTPUT
           else
             echo "run_scan=false" >> $GITHUB_OUTPUT
-            echo "::warning::Pipeline scan skipped because SCAN_API_ID or SCAN_API_KEY secrets are not set."
+            echo "::warning::Pipeline scan skipped because SCAN_API_ID or SCAN_API_KEY are not set."
           fi
 
       - name: Run Veracode Pipeline Scan
@@ -322,7 +321,7 @@ jobs:
             echo "run_scan=true" >> $GITHUB_OUTPUT
           else
             echo "run_scan=false" >> $GITHUB_OUTPUT
-            echo "::warning::SAST scan skipped because SCAN_API_ID or SCAN_API_KEY secrets are not set."
+            echo "::warning::SAST scan skipped because SCAN_API_ID or SCAN_API_KEY are not set."
           fi
 
       - name: Run Veracode Upload & SAST
@@ -339,15 +338,8 @@ jobs:
           version: "${{ github.run_id }}-${{ github.run_attempt }}"
           deleteincompletescan: 2
 
-      # ⚡️ Java via setup-java (cacheado) + wrapper do Maven Central + parsing do XML em Python (sem apt)
-      - name: Setup Java
-        if: steps.check_sast_secrets.outputs.run_scan == 'true'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Get AppID/BuildID via Java API Wrapper (rápido, sem apt)
+      # 🔽 Baixar o JAR do wrapper, obter APP_ID e BUILD_ID
+      - name: Get AppID/BuildID via Java API Wrapper
         id: get_ids
         if: steps.check_sast_secrets.outputs.run_scan == 'true'
         env:
@@ -355,6 +347,8 @@ jobs:
           VERSION_TAG: "${{ github.run_id }}-${{ github.run_attempt }}"
         run: |
           set -euo pipefail
+          sudo apt-get update -y && sudo apt-get install -y default-jre libxml2-utils curl
+
           APP_NAME="GitHub - ${PROJECT_NAME}"
           echo "🔎 Procurando APP pelo nome: ${APP_NAME}"
 
@@ -362,63 +356,54 @@ jobs:
           curl -fsSL "$WRAPPER_URL" -o vosp-api-wrappers-java-25.8.16.1.jar
           ln -sf vosp-api-wrappers-java-25.8.16.1.jar VeracodeJavaAPI.jar
 
-          # Executa getapplist e salva XML
           java -jar VeracodeJavaAPI.jar \
             -action getapplist \
             -vid "${{ secrets.SCAN_API_ID }}" \
             -vkey "${{ secrets.SCAN_API_KEY }}" > applist.xml 2>/dev/null || true
 
           if [[ ! -s "applist.xml" ]]; then
-            echo "::error::applist.xml não foi gerado."
+            echo "::error::Falha ao obter applist.xml via wrapper."
             exit 1
           fi
 
-          # Extrai APP_ID com Python (sem dependências extras)
-          APP_ID="$(
-          python3 - "$APP_NAME" <<'PY'
-import sys, xml.etree.ElementTree as ET
-APP_NAME = sys.argv[1]
-root = ET.parse('applist.xml').getroot()
-def lname(t): return t.split('}',1)[-1]
-app_id = ''
-for el in root.iter():
-    if lname(el.tag) in ('app','application') and el.attrib.get('app_name') == APP_NAME:
-        app_id = el.attrib.get('app_id','')
-        break
-print(app_id, end='')
-PY
-          )"
+          APP_ID="$(xmllint --xpath "string(//*[local-name()='application' or local-name()='app'][@app_name='${APP_NAME}']/@app_id)" applist.xml 2>/dev/null || true)"
 
           if [[ -z "$APP_ID" ]]; then
-            echo "::error::app_id não encontrado para '${APP_NAME}'"
+            echo "::error::app_id não encontrado para '${APP_NAME}' no applist.xml"
             exit 1
           fi
           echo "✅ APPID: $APP_ID"
 
-          # Busca BUILD_ID via getbuildlist
           BUILD_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
             "https://analysiscenter.veracode.com/api/5.0/getbuildlist.do?app_id=${APP_ID}")"
 
-          BUILD_ID="$(
-          python3 - "$VERSION_TAG" <<'PY'
-import sys, xml.etree.ElementTree as ET
-from io import StringIO
-version = sys.argv[1]
-xml = sys.stdin.read()
-root = ET.parse(StringIO(xml)).getroot()
-def lname(t): return t.split('}',1)[-1]
-bid = ''
-for el in root.iter():
-    if lname(el.tag) == 'build' and el.attrib.get('version') == version:
-        bid = el.attrib.get('build_id','')
-        break
-print(bid, end='')
-PY
-          <<< "$BUILD_XML"
-          )"
+          BUILD_ID="$(echo "$BUILD_XML" | xmllint --xpath "string(//*[local-name()='build'][@version='${VERSION_TAG}']/@build_id)" - 2>/dev/null || true)"
 
           echo "app_id=${APP_ID}"   >> "$GITHUB_OUTPUT"
           echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
 
           echo "📌 AppID: ${APP_ID}"
           echo "📌 BuildID: ${BUILD_ID:-<não encontrado p/ essa versão>}"
+
+      # ✅ Atualizar a Business Unit do app para "DEMO"
+      - name: Atualizar Business Unit para DEMO
+        if: steps.check_sast_secrets.outputs.run_scan == 'true'
+        run: |
+          set -euo pipefail
+          # garante que o jar está aqui (caso o step anterior tenha falhado/alterado diretório)
+          if [[ ! -f VeracodeJavaAPI.jar ]]; then
+            WRAPPER_URL="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/25.8.16.1/vosp-api-wrappers-java-25.8.16.1.jar"
+            curl -fsSL "$WRAPPER_URL" -o vosp-api-wrappers-java-25.8.16.1.jar
+            ln -sf vosp-api-wrappers-java-25.8.16.1.jar VeracodeJavaAPI.jar
+          fi
+
+          APP_ID="${{ steps.get_ids.outputs.app_id }}"
+          echo "🛠 Atualizando BU do app ${APP_ID} para DEMO ..."
+          java -jar VeracodeJavaAPI.jar \
+            -action updateapp \
+            -appid "${APP_ID}" \
+            -businessunit "DEMO" \
+            -vid "${{ secrets.SCAN_API_ID }}" \
+            -vkey "${{ secrets.SCAN_API_KEY }}"
+
+          echo "✅ BU atualizada para DEMO."
