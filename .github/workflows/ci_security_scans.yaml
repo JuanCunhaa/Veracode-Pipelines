@@ -338,8 +338,8 @@ jobs:
           version: "${{ github.run_id }}-${{ github.run_attempt }}"
           deleteincompletescan: 2
 
-      # 🔽 Baixar o Java API Wrapper e executar `-action getapplist`, depois extrair o APPID
-      - name: Get AppID/BuildID via Java API Wrapper (com fallback XML)
+      # 🔽 Baixar o JAR do wrapper (link que você passou), rodar getapplist e extrair APPID/BUILDID
+      - name: Get AppID/BuildID via Java API Wrapper
         id: get_ids
         if: steps.check_sast_secrets.outputs.run_scan == 'true'
         env:
@@ -352,58 +352,35 @@ jobs:
           APP_NAME="GitHub - ${PROJECT_NAME}"
           echo "🔎 Procurando APP pelo nome: ${APP_NAME}"
 
-          # Tentativas de download do Java API Wrapper
-          WRAPPER="VeracodeJavaAPI.jar"
-          urls=(
-            "https://downloads.veracode.com/securityscan/VeracodeJavaAPI.jar"
-            "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/java/VeracodeJavaAPI/25.8.16.1/VeracodeJavaAPI-25.8.16.1.jar"
-          )
-          got=""
-          for u in "${urls[@]}"; do
-            echo "Baixando wrapper de: $u"
-            if curl -fsSL "$u" -o "$WRAPPER"; then
-              got="yes"
-              break
-            fi
-          done
+          # Baixar jar do wrapper (URL oficial que você mandou) e dar um nome estável
+          WRAPPER_URL="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/25.8.16.1/vosp-api-wrappers-java-25.8.16.1.jar"
+          curl -fsSL "$WRAPPER_URL" -o vosp-api-wrappers-java-25.8.16.1.jar
+          ln -sf vosp-api-wrappers-java-25.8.16.1.jar VeracodeJavaAPI.jar
 
-          APP_ID=""
-          BUILD_ID=""
+          # Executa getapplist com credenciais e salva o XML
+          java -jar VeracodeJavaAPI.jar \
+            -action getapplist \
+            -vid "${{ secrets.SCAN_API_ID }}" \
+            -vkey "${{ secrets.SCAN_API_KEY }}" > applist.xml 2>/dev/null || true
 
-          if [[ -n "$got" && -s "$WRAPPER" ]]; then
-            echo "✅ Wrapper baixado. Rodando: getapplist"
-            # Executa getapplist com credenciais
-            java -jar "$WRAPPER" \
-              -action getapplist \
-              -vid "${{ secrets.SCAN_API_ID }}" \
-              -vkey "${{ secrets.SCAN_API_KEY }}" > applist.xml 2>/dev/null || true
-
-            if [[ -s "applist.xml" ]]; then
-              # Extrai o app_id do XML gerado pelo wrapper
-              APP_ID="$(xmllint --xpath "string(//*[local-name()='application' or local-name()='app'][@app_name='${APP_NAME}']/@app_id)" applist.xml 2>/dev/null || true)"
-            fi
-          else
-            echo "⚠️ Não foi possível baixar o wrapper. Indo para fallback via XML API."
-          fi
-
-          # Fallback direto na XML API (caso o wrapper não traga o dado)
-          if [[ -z "$APP_ID" ]]; then
-            echo "Usando fallback: getapplist.do via XML API"
-            APP_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
-              "https://analysiscenter.veracode.com/api/5.0/getapplist.do")"
-            APP_ID="$(echo "$APP_XML" | xmllint --xpath "string(//*[local-name()='application' or local-name()='app'][@app_name='${APP_NAME}']/@app_id)" - 2>/dev/null || true)"
-          fi
-
-          if [[ -z "$APP_ID" ]]; then
-            echo "::error::app_id não encontrado para '${APP_NAME}'"
+          if [[ ! -s "applist.xml" ]]; then
+            echo "::error::Falha ao obter applist.xml via wrapper."
             exit 1
           fi
 
+          # Extrai app_id independente de namespace (funciona p/ <app> e <application>)
+          APP_ID="$(xmllint --xpath "string(//*[local-name()='application' or local-name()='app'][@app_name='${APP_NAME}']/@app_id)" applist.xml 2>/dev/null || true)"
+
+          if [[ -z "$APP_ID" ]]; then
+            echo "::error::app_id não encontrado para '${APP_NAME}' no applist.xml"
+            exit 1
+          fi
           echo "✅ APPID: $APP_ID"
 
-          # Obter BUILD_ID (pela versão usada no uploadandscan)
+          # Buscar build_id correspondente à versão do uploadandscan
           BUILD_XML="$(curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
             "https://analysiscenter.veracode.com/api/5.0/getbuildlist.do?app_id=${APP_ID}")"
+
           BUILD_ID="$(echo "$BUILD_XML" | xmllint --xpath "string(//*[local-name()='build'][@version='${VERSION_TAG}']/@build_id)" - 2>/dev/null || true)"
 
           echo "app_id=${APP_ID}"   >> "$GITHUB_OUTPUT"
