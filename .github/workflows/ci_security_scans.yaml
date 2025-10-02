@@ -288,7 +288,7 @@ jobs:
       build_id: ${{ steps.get_ids.outputs.build_id }}
     steps:
       - name: Download analysisPack artifact
-      - uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4
         with:
           name: analysisPack
           path: ${{ inputs.build_artifact_path }}
