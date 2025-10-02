@@ -333,15 +333,33 @@ jobs:
           version: "${{ github.run_id }}-${{ github.run_attempt }}"
           deleteincompletescan: 2
 
-      - name: Capturar AppID
+      - name: Baixar logs do workflow run e extrair AppID (alternativa)
         if: steps.check_sast_secrets.outputs.run_scan == 'true'
         run: |
-          APPID=$(cat $GITHUB_STEP_SUMMARY | grep -oP 'App ID: \K[0-9]+')
-          echo "APPID=$APPID" >> $GITHUB_ENV
-          echo "📌 AppID capturado: $APPID"
-
-      - name: Obter AppID pela API
-        run: |
-          curl -s -u "${{ secrets.SCAN_API_ID }}:${{ secrets.SCAN_API_KEY }}" \
-            "https://analysiscenter.veracode.com/api/5.0/getapplist.do" \
-            | xmllint --xpath "//application[@app_name='GitHub - ${{ env.PROJECT_NAME }}']/@app_id" -
+          set -euo pipefail
+          sudo apt-get update -y && sudo apt-get install -y unzip curl jq
+      
+          RUN_ID=${{ github.run_id }}
+          REPO="${{ github.repository }}"
+          OWNER=$(echo "$REPO" | cut -d'/' -f1)
+          REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+      
+          echo "Baixando logs para run_id=$RUN_ID ..."
+          curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO_NAME}/actions/runs/${RUN_ID}/logs" \
+            -o /tmp/run-logs.zip
+      
+          unzip -q /tmp/run-logs.zip -d /tmp/run-logs
+          # procurar por arquivo de log do job/step que rodou o action
+          grep -R --line-number "appid=" /tmp/run-logs || true
+          # exemplo simples: extrair appid de qualquer arquivo de log
+          APPID=$(grep -oP 'appid=\K[0-9]+' /tmp/run-logs/* | head -n1 || true)
+      
+          if [[ -z "$APPID" ]]; then
+            echo "APPID não encontrado nos logs baixados."
+            exit 1
+          fi
+      
+          echo "app_id=$APPID" >> $GITHUB_OUTPUT
+          echo "APPID extraído dos logs: $APPID"
