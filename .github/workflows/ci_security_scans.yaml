@@ -375,17 +375,17 @@ jobs:
 
               # Extrai APP_ID com Python (sem dependências extras)
               APP_ID="$(python3 - <<'PY'
-  import sys, xml.etree.ElementTree as ET
-  APP_NAME = sys.argv[1]
-  root = ET.parse('applist.xml').getroot()
-  def lname(t): return t.split('}',1)[-1]
-  app_id = ''
-  for el in root.iter():
-      if lname(el.tag) in ('app','application') and el.attrib.get('app_name') == APP_NAME:
-          app_id = el.attrib.get('app_id','')
-          break
-  print(app_id, end='')
-  PY
+              import sys, xml.etree.ElementTree as ET
+              APP_NAME = sys.argv[1]
+              root = ET.parse('applist.xml').getroot()
+              def lname(t): return t.split('}',1)[-1]
+              app_id = ''
+              for el in root.iter():
+                  if lname(el.tag) in ('app','application') and el.attrib.get('app_name') == APP_NAME:
+                      app_id = el.attrib.get('app_id','')
+                      break
+              print(app_id, end='')
+              PY
               "$APP_NAME")"
 
               if [[ -z "$APP_ID" ]]; then
@@ -399,19 +399,19 @@ jobs:
                 "https://analysiscenter.veracode.com/api/5.0/getbuildlist.do?app_id=${APP_ID}")"
 
               BUILD_ID="$(python3 - <<'PY'
-  import sys, xml.etree.ElementTree as ET
-  from io import StringIO
-  xml = sys.stdin.read()
-  version = sys.argv[1]
-  root = ET.parse(StringIO(xml)).getroot()
-  def lname(t): return t.split('}',1)[-1]
-  bid = ''
-  for el in root.iter():
-      if lname(el.tag) == 'build' and el.attrib.get('version') == version:
-          bid = el.attrib.get('build_id','')
-          break
-  print(bid, end='')
-  PY
+              import sys, xml.etree.ElementTree as ET
+              from io import StringIO
+              xml = sys.stdin.read()
+              version = sys.argv[1]
+              root = ET.parse(StringIO(xml)).getroot()
+              def lname(t): return t.split('}',1)[-1]
+              bid = ''
+              for el in root.iter():
+                  if lname(el.tag) == 'build' and el.attrib.get('version') == version:
+                      bid = el.attrib.get('build_id','')
+                      break
+              print(bid, end='')
+              PY
               "$VERSION_TAG" <<< "$BUILD_XML")"
 
               echo "app_id=${APP_ID}"   >> "$GITHUB_OUTPUT"
